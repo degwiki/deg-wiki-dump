@@ -1,0 +1,120 @@
+# Забирает свежие дампы с https://deg.wiki/dumps/ и публикует их релизом.
+#
+# Сервер вики про GitHub ничего не знает: он просто выкладывает файлы, а забираем их мы.
+# Поэтому здесь не нужен ни токен на сервере, ни исходящий доступ с него — работает
+# встроенный GITHUB_TOKEN, который живёт только во время задания.
+name: Зеркалирование дампов
+
+on:
+  schedule:
+    # Понедельник, 06:00 UTC. Сервер собирает дампы по воскресеньям в 04:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Единственное право, которое нужно: создавать релизы
+permissions:
+  contents: write
+
+env:
+  SRC: https://deg.wiki/dumps
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Узнать, какой набор лежит на сервере
+        id: check
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-delay 10 "$SRC/SHA256SUMS-latest.txt" -o sums.txt
+          echo "--- контрольные суммы на сервере ---"; cat sums.txt
+
+          DATE=$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' sums.txt | head -1)
+          [ -n "$DATE" ] || { echo "не удалось определить дату набора"; exit 1; }
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+
+          # Идемпотентность: если релиз за эту дату уже есть — делать нечего
+          if gh release view "dump-$DATE" >/dev/null 2>&1; then
+            echo "релиз dump-$DATE уже существует, пропускаю"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Скачать дампы
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          while read -r _ NAME; do
+            echo "качаю $NAME"
+            curl -fsSL --retry 3 --retry-delay 10 "$SRC/$NAME" -o "$NAME"
+          done < sums.txt
+          ls -lh deg-wiki-*
+
+      - name: Сверить контрольные суммы
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          # Без этой проверки можно опубликовать битое зеркало и не заметить
+          sha256sum -c sums.txt
+          echo "суммы сошлись"
+
+      - name: Проверить, что дамп страниц читается
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          # Дешёвая защита от обрезанного дампа: распаковываем и считаем страницы
+          PAGES=$(ls deg-wiki-pages-*.xml.zst)
+          zstd -dq "$PAGES" -o pages.xml
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          pages = revs = 0
+          for _, el in ET.iterparse('pages.xml', events=('end',)):
+              if el.tag.endswith('}page'): pages += 1; el.clear()
+              elif el.tag.endswith('}revision'): revs += 1
+          print(f'страниц: {pages}, ревизий: {revs}')
+          assert pages > 100, 'подозрительно мало страниц'
+          PY
+          rm -f pages.xml
+
+      - name: Опубликовать релиз
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          DATE="${{ steps.check.outputs.date }}"
+          {
+            echo "Дамп сайта https://deg.wiki на $DATE."
+            echo
+            echo '| Файл | Что внутри |'
+            echo '|---|---|'
+            echo "| \`deg-wiki-pages-$DATE.xml.zst\` | тексты всех страниц со всей историей правок |"
+            echo "| \`deg-wiki-images-$DATE.tar.zst\` | загруженные файлы: картинки, сканы |"
+            echo
+            echo '### Как распаковать'
+            echo '```sh'
+            echo "zstd -d deg-wiki-pages-$DATE.xml.zst"
+            echo "tar --zstd -xf deg-wiki-images-$DATE.tar.zst"
+            echo '```'
+            echo
+            echo '### Как проверить, что скачалось целиком'
+            echo '```sh'
+            echo "sha256sum -c SHA256SUMS-$DATE.txt"
+            echo '```'
+            echo
+            echo '### Контрольные суммы'
+            echo '```'
+            cat sums.txt
+            echo '```'
+            echo
+            echo 'Собрано автоматически. Учётные записи, пароли и служебные журналы в дамп не входят.'
+          } > notes.md
+
+          cp sums.txt "SHA256SUMS-$DATE.txt"
+          gh release create "dump-$DATE" \
+            --title "Дамп deg.wiki за $DATE" \
+            --notes-file notes.md \
+            deg-wiki-*.zst "SHA256SUMS-$DATE.txt"
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -21,6 +21,13 @@ env:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    env:
+      # checkout мы не делаем — содержимое репы для зеркалирования не нужно.
+      # Без GH_REPO gh пытается определить репозиторий по git-контексту и падает
+      # с "not a git repository", а в проверке идемпотентности это падение
+      # проглатывалось и выглядело как "релиза ещё нет".
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Узнать, какой набор лежит на сервере
         id: check
@@ -33,15 +40,14 @@ jobs:
           [ -n "$DATE" ] || { echo "не удалось определить дату набора"; exit 1; }
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
 
-          # Идемпотентность: если релиз за эту дату уже есть — делать нечего
-          if gh release view "dump-$DATE" >/dev/null 2>&1; then
+          # Идемпотентность: если релиз за эту дату уже есть — делать нечего.
+          # Ошибку gh не проглатываем: "релиза нет" и "gh сломался" — разные вещи.
+          if gh release list --limit 100 | grep -q "^dump-$DATE\b"; then
             echo "релиз dump-$DATE уже существует, пропускаю"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
 
       - name: Скачать дампы
         if: steps.check.outputs.skip == 'false'
@@ -116,5 +122,3 @@ jobs:
             --title "Дамп deg.wiki за $DATE" \
             --notes-file notes.md \
             deg-wiki-*.zst "SHA256SUMS-$DATE.txt"
-        env:
-          GH_TOKEN: ${{ github.token }}

@@ -41,8 +41,11 @@ jobs:
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
 
           # Идемпотентность: если релиз за эту дату уже есть — делать нечего.
-          # Ошибку gh не проглатываем: "релиза нет" и "gh сломался" — разные вещи.
-          if gh release list --limit 100 | grep -q "^dump-$DATE\b"; then
+          # Теги берём через --json: в обычном выводе gh release list первой
+          # колонкой идёт НАЗВАНИЕ релиза, а не тег, и сравнение промахивается.
+          gh release list --limit 100 --json tagName --jq '.[].tagName' > tags.txt
+          echo "--- уже опубликованы ---"; cat tags.txt
+          if grep -qx "dump-$DATE" tags.txt; then
             echo "релиз dump-$DATE уже существует, пропускаю"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
